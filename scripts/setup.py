@@ -265,7 +265,7 @@ def resolve_network_storage(partition_name=None):
         "remote_mount": "none",
         "local_mount": "none",
         "fs_type": "nfs",
-        "mount_options": "defaults,hard,intr",
+        "mount_options": "defaults,hard",
     }
 
     # seed mounts with the default controller mounts
@@ -418,7 +418,7 @@ def munge_mount_handler():
     mount_options = (
         mount.mount_options
         if mount.mount_options is not None
-        else "defaults,hard,intr,_netdev"
+        else "defaults,hard,_netdev"
     )
 
     munge_key = Path(dirs.munge / "munge.key")

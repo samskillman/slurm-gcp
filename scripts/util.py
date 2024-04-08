@@ -371,7 +371,7 @@ def load_config_data(config):
                 "server_ip": cfg.slurm_control_addr or cfg.slurm_control_host,
                 "remote_mount": "/etc/munge",
                 "fs_type": "nfs",
-                "mount_options": "defaults,hard,intr,_netdev",
+                "mount_options": "defaults,hard,_netdev",
             }
         )
 
