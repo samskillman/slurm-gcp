@@ -22,6 +22,37 @@ are iterated over by the `slurm_mux` external epilog and prolog feature.
 - [sudo-all-jobs-users](sudo-all-jobs-users): ensures that every job can run
   sudo; _this configuration is recommended only for debugging purposes_.
 
+## GPU Health Checks
+
+These scripts help monitor the health of GPU nodes within the Slurm cluster.
+
+### `gpu_health_check.sh`
+
+*   **Purpose**: Performs basic GPU diagnostics using `nvidia-smi` and `dcgm-diag -r 1` (level 1 tests).
+*   **Usage**: Designed to be run by Slurm's `Prolog` and `Epilog` mechanisms.
+    *   `Prolog={{ slurm_scripts_path }}/gpu_health_check.sh prolog`
+    *   `Epilog={{ slurm_scripts_path }}/gpu_health_check.sh epilog`
+    (Replace `{{ slurm_scripts_path }}` with the actual path, e.g., `/opt/slurm/scripts`).
+    It can also be run manually with the `healthcheck` argument for testing.
+*   **Failure Behavior**: If either `nvidia-smi` or `dcgm-diag` fails (returns a non-zero exit code), the script will log an error and attempt to drain the node using `scontrol update NodeName=$SLURMD_NODENAME State=DRAIN Reason='...'`.
+*   **Dependencies**: `nvidia-smi`, `dcgm-diag`, `scontrol`.
+
+### `nccl_health_check.sh`
+
+*   **Purpose**: Performs a basic network communication health check between GPU nodes using NCCL. It verifies that two nodes can successfully run a small `nccl-tests` job (`all_reduce_perf`).
+*   **Usage**: Designed to be run by Slurm's `HealthCheckProgram` mechanism.
+    *   `HealthCheckProgram={{ slurm_scripts_path }}/nccl_health_check.sh`
+    *   `HealthCheckInterval=<seconds>` (e.g., 600)
+    *   `HealthCheckNodeState=IDLE` (Recommended to avoid interfering with running jobs)
+    (Replace `{{ slurm_scripts_path }}` with the actual path).
+*   **Operation**:
+    1.  Identifies the current node (`$SLURMD_NODENAME`) and its partition (`$SLURM_JOB_PARTITION`).
+    2.  Searches for another `IDLE` or `MIXED` node in the same partition using `sinfo`.
+    3.  If a partner node is found, it launches a 2-node job (`srun --nodes=2 --ntasks=2 --ntasks-per-node=1 --gpus-per-task=<N> ...`) running `all_reduce_perf -g <N> ...`. The number of GPUs `<N>` is determined by checking `$CUDA_VISIBLE_DEVICES` (defaulting to 1).
+    4.  If no partner node is available, the script exits successfully without running the test.
+*   **Failure Behavior**: If the `srun` command executing `all_reduce_perf` fails, the script logs an error and attempts to drain the *current* node (the one where the health check is running) using `scontrol update NodeName=$SLURMD_NODENAME State=DRAIN Reason='NCCL health check failed...'`.
+*   **Dependencies**: `sinfo`, `srun`, `scontrol`, `nccl-tests` (specifically `all_reduce_perf` must be in the PATH on compute nodes), `awk` (for GPU parsing).
+
 ## Directory pattern
 
 For example, if the following symbolic links are created:

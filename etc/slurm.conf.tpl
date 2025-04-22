@@ -65,3 +65,10 @@ include cloud.conf
 ################################################################################
 #              ^^^^^  WARNING: DO NOT MODIFY SECTION ABOVE  ^^^^^              #
 ################################################################################
+
+# HEALTH CHECKS
+Prolog={{ slurm_paths.scripts }}/gpu_health_check.sh prolog
+Epilog={{ slurm_paths.scripts }}/gpu_health_check.sh epilog
+HealthCheckProgram={{ slurm_paths.scripts }}/nccl_health_check.sh
+HealthCheckInterval=600
+HealthCheckNodeState=IDLE

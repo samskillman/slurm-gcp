@@ -75,8 +75,19 @@
   - util.py
   - load_bq.py
 
+- name: Copy Health Check Scripts
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/tools/prologs-epilogs/{{ item }}"
+    dest: "{{ slurm_paths.scripts }}/{{ item }}"
+    owner: "{{ slurm_user.user }}"
+    group: "{{ slurm_user.group }}"
+    mode: '0755'
+  loop:
+    - gpu_health_check.sh
+    - nccl_health_check.sh
+
 - name: Copy slurm_gcp_plugins
-  copy:
+  ansible.builtin.copy:
     src: scripts/slurm_gcp_plugins
     dest: '{{ slurm_paths.scripts }}/'
     owner: '{{slurm_user.user}}'
