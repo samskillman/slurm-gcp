@@ -55,6 +55,9 @@
       modulefiles: /opt/apps/modulefiles
     install_cuda: true
     install_ompi: true
+    ompi_version: v4.1.x
+    ompi_with_cuda: true
+    ompi_cuda_path: /usr/local/cuda
     install_lustre: true
     install_managed_lustre: false
     slurm_patch_files: []

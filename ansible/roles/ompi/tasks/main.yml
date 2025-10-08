@@ -53,6 +53,7 @@
       --with-pmi={{ompi_paths.install}}
       --with-libevent=/usr
       --with-hwloc=/usr
+      {% if install_cuda and ompi_with_cuda %}--with-cuda={{ ompi_cuda_path }}{% endif %}
       > /dev/null
     chdir: '{{ompi_paths.build}}'
 
