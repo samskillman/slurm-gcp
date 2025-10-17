@@ -19,14 +19,9 @@
   register: gcsfuse_spank_installed
 
 - block:
-  - name: Copy gcsfuse_spank source
-    copy:
-      src: ansible/roles/gcsfuse_spank/files/
-      dest: '{{paths.build}}/gcsfuse_spank'
-
   - name: Build and install gcsfuse_spank
     make:
-      chdir: '{{paths.build}}/gcsfuse_spank'
+      chdir: "{{ role_path }}/files"
       target: install
 
   - name: Configure gcsfuse_spank in plugstack.conf
