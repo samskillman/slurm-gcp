@@ -62,6 +62,7 @@
     install_pmix: true
     install_pyxis: true
     allow_kernel_upgrades: true
+    ompi_version: v4.1.x
 
   pre_tasks:
   - name: Minimum Ansible Version Check
