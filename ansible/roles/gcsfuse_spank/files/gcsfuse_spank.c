@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <signal.h>
 #include <slurm/spank.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -39,6 +40,7 @@
 #define GCSFUSE_BIN "/usr/bin/gcsfuse"
 #define MOUNT_WAIT_RETRIES 60
 #define MOUNT_WAIT_SLEEP_US 500000
+#define CLEANUP_ENV_VAR "SLURM_SPANK_GCSFUSE_CLEANUP"
 
 SPANK_PLUGIN(gcsfuse_mount, 1);
 
@@ -47,11 +49,6 @@ typedef struct {
   char* mount_point;
   char* flags;
 } mount_spec_t;
-
-// Global tracking for cleanup
-static char** mount_points = NULL;
-static pid_t* gcsfuse_pids = NULL;
-static int mount_point_count = 0;
 
 static void free_mount_spec(mount_spec_t* spec) {
   if (spec->bucket) free(spec->bucket);
@@ -629,6 +626,25 @@ static int check_mount_conflicts(const char* current_mounts,
   return 0;
 }
 
+static int append_cleanup_info(spank_t sp, pid_t pid, const char* mount_point) {
+  char buf[4096];
+  char* new_val = NULL;
+
+  if (spank_getenv(sp, CLEANUP_ENV_VAR, buf, sizeof(buf)) == ESPANK_SUCCESS) {
+    if (asprintf(&new_val, "%s;%d:%s", buf, pid, mount_point) < 0)
+      return -1;
+  } else {
+    if (asprintf(&new_val, "%d:%s", pid, mount_point) < 0)
+      return -1;
+  }
+
+  if (new_val) {
+    spank_setenv(sp, CLEANUP_ENV_VAR, new_val, 1);
+    free(new_val);
+  }
+  return 0;
+}
+
 int slurm_spank_init(spank_t sp, int ac, char** av) {
   (void)ac;
   (void)av;
@@ -705,32 +721,7 @@ int slurm_spank_user_init(spank_t sp, int ac, char** av) {
           pid_t pid = mount_gcsfuse(spec.bucket, spec.mount_point, spec.flags,
                                     uid, gid);
           if (pid > 0) {
-            /*
-             * Track both the mount point path and the PID of the gcsfuse
-             * daemon. Tracking the PID is necessary because gcsfuse is started
-             * in the foreground but managed by this plugin; we need to
-             * explicitly terminate it during cleanup to prevent leaked
-             * processes.
-             */
-            char** next_points =
-                realloc(mount_points, (mount_point_count + 1) * sizeof(char*));
-            if (!next_points) {
-              slurm_error("gcsfuse-mount: Failed to realloc mount_points");
-              rc = -1;
-            } else {
-              mount_points = next_points;
-              pid_t* next_pids = realloc(
-                  gcsfuse_pids, (mount_point_count + 1) * sizeof(pid_t));
-              if (!next_pids) {
-                slurm_error("gcsfuse-mount: Failed to realloc gcsfuse_pids");
-                rc = -1;
-              } else {
-                gcsfuse_pids = next_pids;
-                mount_points[mount_point_count] = strdup(spec.mount_point);
-                gcsfuse_pids[mount_point_count] = pid;
-                mount_point_count++;
-              }
-            }
+            append_cleanup_info(sp, pid, spec.mount_point);
           } else {
             rc = -1;
           }
@@ -746,20 +737,45 @@ int slurm_spank_user_init(spank_t sp, int ac, char** av) {
 }
 
 int slurm_spank_exit(spank_t sp, int ac, char** av) {
-  (void)sp;
   (void)ac;
   (void)av;
   if (spank_context() != S_CTX_REMOTE) return 0;
-  for (int i = 0; i < mount_point_count; i++) {
-    unmount_gcsfuse(mount_points[i]);
-    if (gcsfuse_pids[i] > 0) {
-      kill(gcsfuse_pids[i], SIGKILL);
-      waitpid(gcsfuse_pids[i], NULL, 0);
-    }
-    free(mount_points[i]);
+
+  char cleanup_env[8192];
+  if (spank_getenv(sp, CLEANUP_ENV_VAR, cleanup_env, sizeof(cleanup_env)) !=
+      ESPANK_SUCCESS) {
+    return 0;
   }
-  if (mount_points) free(mount_points);
-  if (gcsfuse_pids) free(gcsfuse_pids);
-  mount_point_count = 0;
+
+  char* env_copy = strdup(cleanup_env);
+  char* saveptr;
+  char* token = strtok_r(env_copy, ";", &saveptr);
+
+  while (token) {
+    char* colon = strchr(token, ':');
+    if (colon) {
+      *colon = '\0';
+      pid_t pid = atoi(token);
+      char* mount_point = colon + 1;
+
+      if (pid > 0) {
+        // 1. Terminate gracefully first
+        kill(pid, SIGTERM);
+      }
+
+      // 2. Unmount
+      unmount_gcsfuse(mount_point);
+
+      if (pid > 0) {
+        // 3. Force kill if still running
+        // Using WNOHANG to check status would be better but this is cleanup
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+      }
+    }
+    token = strtok_r(NULL, ";", &saveptr);
+  }
+
+  free(env_copy);
   return 0;
 }

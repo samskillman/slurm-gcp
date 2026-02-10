@@ -182,10 +182,29 @@ void test_check_mount_conflicts() {
   printf("PASS\n");
 }
 
+void test_append_cleanup_info() {
+  printf("Running test_append_cleanup_info...\n");
+  memset(mock_env_key, 0, sizeof(mock_env_key));
+  memset(mock_env_val, 0, sizeof(mock_env_val));
+
+  // 1. Append first item
+  append_cleanup_info(NULL, 123, "/mnt/a");
+  assert(strcmp(mock_env_key, CLEANUP_ENV_VAR) == 0);
+  assert(strcmp(mock_env_val, "123:/mnt/a") == 0);
+
+  // 2. Append second item
+  append_cleanup_info(NULL, 456, "/mnt/b");
+  assert(strcmp(mock_env_key, CLEANUP_ENV_VAR) == 0);
+  assert(strcmp(mock_env_val, "123:/mnt/a;456:/mnt/b") == 0);
+
+  printf("PASS\n");
+}
+
 int main() {
   test_parse_mount_spec();
   test_resolve_relative_mounts();
   test_check_mount_conflicts();
+  test_append_cleanup_info();
   printf("All tests passed!\n");
   return 0;
 }
