@@ -347,169 +347,170 @@ static pid_t mount_gcsfuse(const char* bucket, const char* mount_point,
     return 0;
   }
 
-  // --- 3. Fork and Mount ---
-  pid_t pid = fork();
-
-  if (pid == 0) {
-    // >>> CHILD PROCESS START <<<
-
-    /*
-     * A. Drop Privileges
-     * We drop to the job user's UID/GID before calling gcsfuse. This ensures:
-     * 1. gcsfuse runs with the user's permissions.
-     * 2. Any user-provided flags (like --key-file) cannot be used to access
-     *    privileged system files that the user themselves cannot read.
-     */
-    if (geteuid() == 0) {
-      if (setresgid(gid, gid, -1) != 0) {
-        slurm_error("gcsfuse-mount: setresgid failed: %m");
-        exit(1);
-      }
-      if (setresuid(uid, uid, -1) != 0) {
-        slurm_error("gcsfuse-mount: setresuid failed: %m");
-        exit(1);
-      }
-    }
-
-    // B. Setup Environment
-    struct passwd* pw = getpwuid(uid);
-    if (pw) setenv("HOME", pw->pw_dir, 1);
-
-    // C. Validate/Create Mount Point
-    struct stat st;
-    if (lstat(mount_point, &st) == 0) {
-      if (!S_ISDIR(st.st_mode)) {
-        slurm_error("gcsfuse-mount: Error: %s exists but is not a directory.",
-                    mount_point);
-        exit(1);
-      }
-      if (st.st_uid != uid) {
-        slurm_error(
-            "gcsfuse-mount: Security Error: You do not own the mount point %s.",
-            mount_point);
-        exit(1);
-      }
-      if (!is_directory_empty(mount_point)) {
-        slurm_error("gcsfuse-mount: Error: Mount point %s is not empty.",
-                    mount_point);
-        exit(1);
-      }
-      if (access(mount_point, W_OK) != 0) {
-        slurm_error("gcsfuse-mount: Permission denied. Cannot write to %s.",
-                    mount_point);
-        exit(1);
-      }
-    } else if (errno == ENOENT) {
-      if (mkdir(mount_point, 0755) != 0) {
-        slurm_error("gcsfuse-mount: failed to mkdir %s: %m", mount_point);
-        exit(1);
-      }
-    } else {
-      slurm_error("gcsfuse-mount: lstat failed on %s. Error: %d", mount_point,
-                  errno);
-      exit(1);
-    }
-
-    /*
-     * D. Setup Logging
-     * We use a nested fork to run the 'logger' command. The main child's
-     * stdout/stderr are piped to logger's stdin. This ensures gcsfuse output
-     * is captured in syslog/journald with a recognizable tag, making it
-     * much easier to debug mount failures on remote nodes.
-     */
-    int log_pipe[2];
-    if (pipe(log_pipe) == -1) exit(1);
-
-    pid_t logger_pid = fork();
-    if (logger_pid == 0) {
-      close(log_pipe[1]);
-      dup2(log_pipe[0], STDIN_FILENO);
-      close(log_pipe[0]);
-      int devnull = open("/dev/null", O_WRONLY);
-      if (devnull != -1) {
-        dup2(devnull, STDOUT_FILENO);
-        dup2(devnull, STDERR_FILENO);
-        close(devnull);
-      }
-      execlp("logger", "logger", "-t", "gcsfuse_mount", "-p", "user.info",
-             NULL);
-      _exit(127);
-    }
-
-    close(log_pipe[0]);
-    dup2(log_pipe[1], STDOUT_FILENO);
-    dup2(log_pipe[1], STDERR_FILENO);
-    close(log_pipe[1]);
-    int devnull = open("/dev/null", O_RDONLY);
-    if (devnull != -1) {
-      dup2(devnull, STDIN_FILENO);
-      close(devnull);
-    }
-
-    char uid_str[20], gid_str[20];
-    sprintf(uid_str, "%u", uid);
-    sprintf(gid_str, "%u", gid);
-
-    char* gcsfuse_argv[64];
-    int j = 0;
-    gcsfuse_argv[j++] = GCSFUSE_BIN;
-    gcsfuse_argv[j++] = "--foreground";
-    gcsfuse_argv[j++] = "-o";
-    gcsfuse_argv[j++] = "allow_other";
-    gcsfuse_argv[j++] = "--uid";
-    gcsfuse_argv[j++] = uid_str;
-    gcsfuse_argv[j++] = "--gid";
-    gcsfuse_argv[j++] = gid_str;
-    gcsfuse_argv[j++] = "--log-format";
-    gcsfuse_argv[j++] = "json";
-
-    if (flags) {
-      char* flag_str = strdup(flags);
-      if (flag_str) {
-        char* flag = strtok(flag_str, " ");
-        while (flag && j < 60) {
-          gcsfuse_argv[j++] = flag;
-          flag = strtok(NULL, " ");
-        }
-        // No need to free(flag_str) before execv, but good practice if execv
-        // fails
-      }
-    }
-
-    if (effective_bucket_arg) {
-      gcsfuse_argv[j++] = (char*)effective_bucket_arg;
-    }
-
-    gcsfuse_argv[j++] = (char*)mount_point;
-    gcsfuse_argv[j] = NULL;
-
-    /* --- DEBUG: Print the full command --- */
-    char debug_buffer[8192] = {0};
-    int offset = 0;
-    for (int k = 0; gcsfuse_argv[k] != NULL; k++) {
-      int written =
-          snprintf(debug_buffer + offset, sizeof(debug_buffer) - offset, "%s ",
-                   gcsfuse_argv[k]);
-      if (written > 0 && offset + written < (int)sizeof(debug_buffer)) {
-        offset += written;
-      } else {
-        break;
-      }
-    }
-    dprintf(STDERR_FILENO, "DEBUG: Executing: %s\n", debug_buffer);
-    /* ------------------------------------- */
-
-    execv(GCSFUSE_BIN, gcsfuse_argv);
-    slurm_error("gcsfuse-mount: execv failed: %m");
-    exit(1);
-
-    // >>> CHILD PROCESS END <<<
-  } else if (pid < 0) {
-    slurm_error("gcsfuse-mount: fork failed: %m");
+  // --- 3. Double-Fork and Mount (Daemonize) ---
+  // We use a pipe to communicate the Grandchild PID back to the Parent.
+  int pid_pipe[2];
+  if (pipe(pid_pipe) == -1) {
+    slurm_error("gcsfuse-mount: pipe failed: %m");
     return -1;
   }
 
-  // --- 4. Parent Waits for Mount ---
+  pid_t pid = fork();
+
+  if (pid == 0) {
+    // >>> CHILD 1 Process <<<
+    close(pid_pipe[0]); // Close read end
+
+    // Detach from session/terminal
+    if (setsid() == -1) {
+      slurm_error("gcsfuse-mount: setsid failed: %m");
+      _exit(1);
+    }
+
+    // Fork Grandchild (Daemon)
+    pid_t pid2 = fork();
+    if (pid2 == 0) {
+      // >>> GRANDCHILD (Daemon) Process <<<
+
+      // Write our PID to the pipe so Parent can read it
+      pid_t my_pid = getpid();
+      if (write(pid_pipe[1], &my_pid, sizeof(my_pid)) != sizeof(my_pid)) {
+         slurm_error("gcsfuse-mount: failed to write PID to pipe");
+         _exit(1);
+      }
+      close(pid_pipe[1]); // Close write end
+
+      /*
+       * A. Drop Privileges
+       */
+      if (geteuid() == 0) {
+        if (setresgid(gid, gid, -1) != 0) {
+          slurm_error("gcsfuse-mount: setresgid failed: %m");
+          exit(1);
+        }
+        if (setresuid(uid, uid, -1) != 0) {
+          slurm_error("gcsfuse-mount: setresuid failed: %m");
+          exit(1);
+        }
+      }
+
+      // B. Setup Environment
+      struct passwd* pw = getpwuid(uid);
+      if (pw) setenv("HOME", pw->pw_dir, 1);
+
+      // C. Validate/Create Mount Point
+      struct stat st;
+      if (lstat(mount_point, &st) == 0) {
+        if (!S_ISDIR(st.st_mode)) {
+          slurm_error("gcsfuse-mount: Error: %s exists but is not a directory.",
+                      mount_point);
+          exit(1);
+        }
+        if (st.st_uid != uid) {
+          slurm_error(
+              "gcsfuse-mount: Security Error: You do not own the mount point %s.",
+              mount_point);
+          exit(1);
+        }
+        if (!is_directory_empty(mount_point)) {
+          slurm_error("gcsfuse-mount: Error: Mount point %s is not empty.",
+                      mount_point);
+          exit(1);
+        }
+        if (access(mount_point, W_OK) != 0) {
+          slurm_error("gcsfuse-mount: Permission denied. Cannot write to %s.",
+                      mount_point);
+          exit(1);
+        }
+      } else if (errno == ENOENT) {
+        if (mkdir(mount_point, 0755) != 0) {
+          slurm_error("gcsfuse-mount: failed to mkdir %s: %m", mount_point);
+          exit(1);
+        }
+      } else {
+        slurm_error("gcsfuse-mount: lstat failed on %s. Error: %d", mount_point,
+                    errno);
+        exit(1);
+      }
+
+      char uid_str[20], gid_str[20];
+      sprintf(uid_str, "%u", uid);
+      sprintf(gid_str, "%u", gid);
+
+      char* gcsfuse_argv[64];
+      int j = 0;
+      gcsfuse_argv[j++] = GCSFUSE_BIN;
+      gcsfuse_argv[j++] = "--foreground";
+      gcsfuse_argv[j++] = "-o";
+      gcsfuse_argv[j++] = "allow_other";
+      gcsfuse_argv[j++] = "--uid";
+      gcsfuse_argv[j++] = uid_str;
+      gcsfuse_argv[j++] = "--gid";
+      gcsfuse_argv[j++] = gid_str;
+      gcsfuse_argv[j++] = "--log-format";
+      gcsfuse_argv[j++] = "json";
+
+      // Use a log file
+      char log_file_path[256];
+      snprintf(log_file_path, sizeof(log_file_path), "/tmp/gcsfuse_debug_%d.log", uid);
+      gcsfuse_argv[j++] = "--log-file";
+      gcsfuse_argv[j++] = log_file_path;
+
+
+      if (flags) {
+        char* flag_str = strdup(flags);
+        if (flag_str) {
+          char* flag = strtok(flag_str, " ");
+          while (flag && j < 60) {
+            gcsfuse_argv[j++] = flag;
+            flag = strtok(NULL, " ");
+          }
+        }
+      }
+
+      if (effective_bucket_arg) {
+        gcsfuse_argv[j++] = (char*)effective_bucket_arg;
+      }
+
+      gcsfuse_argv[j++] = (char*)mount_point;
+      gcsfuse_argv[j] = NULL;
+
+      execv(GCSFUSE_BIN, gcsfuse_argv);
+      slurm_error("gcsfuse-mount: execv failed: %m");
+      exit(1);
+
+    } else if (pid2 > 0) {
+        // Child 1: Exits immediately so Grandchild is reparented to init
+        _exit(0);
+    } else {
+        slurm_error("gcsfuse-mount: fork (2) failed: %m");
+        _exit(1);
+    }
+
+    // >>> CHILD 1 END <<<
+  } else if (pid < 0) {
+    slurm_error("gcsfuse-mount: fork (1) failed: %m");
+    close(pid_pipe[0]);
+    close(pid_pipe[1]);
+    return -1;
+  }
+
+  // --- 4. Parent Logic ---
+  close(pid_pipe[1]); // Close write end
+
+  // Wait for Child 1 to exit (reap it)
+  waitpid(pid, NULL, 0);
+
+  // Read Grandchild PID from pipe
+  pid_t daemon_pid = -1;
+  if (read(pid_pipe[0], &daemon_pid, sizeof(daemon_pid)) != sizeof(daemon_pid)) {
+      slurm_error("gcsfuse-mount: failed to read daemon PID from pipe");
+      close(pid_pipe[0]);
+      return -1;
+  }
+  close(pid_pipe[0]);
+
+  // Now verify mount
   int found = 0;
   for (int k = 0; k < MOUNT_WAIT_RETRIES; k++) {
     if (is_mountpoint_as_user(mount_point, uid, gid)) {
@@ -517,24 +518,23 @@ static pid_t mount_gcsfuse(const char* bucket, const char* mount_point,
       break;
     }
 
-    int status;
-    if (waitpid(pid, &status, WNOHANG) != 0) {
-      slurm_error(
-          "gcsfuse-mount: mount process exited early (check "
-          "permissions or syslog)");
-      return -1;
+    // Check if daemon is still alive
+    if (kill(daemon_pid, 0) != 0 && errno == ESRCH) {
+        slurm_error("gcsfuse-mount: daemon process %d died early", daemon_pid);
+        return -1;
     }
+
     usleep(MOUNT_WAIT_SLEEP_US);
   }
 
   if (!found) {
     slurm_error("gcsfuse-mount: timed out waiting for %s", mount_point);
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
+    kill(daemon_pid, SIGKILL);
+    // Cannot waitpid on daemon_pid because it is not our child (it is grandchild)
     return -1;
   }
 
-  return pid;
+  return daemon_pid;
 }
 
 static int unmount_gcsfuse(const char* mount_point) {
@@ -645,6 +645,27 @@ static int append_cleanup_info(spank_t sp, pid_t pid, const char* mount_point) {
   return 0;
 }
 
+// --- Debugging Helper ---
+static void log_user_processes(uid_t uid) {
+  // Use fork/exec/wait instead of popen to be signal-safe
+  pid_t pid = fork();
+  if (pid == 0) {
+    // Child
+    char uid_str[32];
+    snprintf(uid_str, sizeof(uid_str), "%d", uid);
+
+    // Redirect stdout to stderr so it shows up in logs
+    dup2(STDERR_FILENO, STDOUT_FILENO);
+
+    execlp("ps", "ps", "-u", uid_str, "-o", "pid,ppid,stat,cmd", NULL);
+    _exit(1);
+  } else if (pid > 0) {
+    int status;
+    waitpid(pid, &status, 0);
+  }
+}
+// ------------------------
+
 int slurm_spank_init(spank_t sp, int ac, char** av) {
   (void)ac;
   (void)av;
@@ -741,6 +762,13 @@ int slurm_spank_exit(spank_t sp, int ac, char** av) {
   (void)av;
   if (spank_context() != S_CTX_REMOTE) return 0;
 
+  // --- Debug: Dump processes ---
+  uid_t uid;
+  if (spank_get_item(sp, S_JOB_UID, &uid) == 0) {
+    log_user_processes(uid);
+  }
+  // -----------------------------
+
   char cleanup_env[8192];
   if (spank_getenv(sp, CLEANUP_ENV_VAR, cleanup_env, sizeof(cleanup_env)) !=
       ESPANK_SUCCESS) {
@@ -768,9 +796,10 @@ int slurm_spank_exit(spank_t sp, int ac, char** av) {
 
       if (pid > 0) {
         // 3. Force kill if still running
-        // Using WNOHANG to check status would be better but this is cleanup
+        // Note: we cannot waitpid() on pid here because it is not our child anymore!
+        // It is a grandchild/daemon.
         kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
+        // waitpid(pid, NULL, 0); // REMOVED: Cannot wait on non-child.
       }
     }
     token = strtok_r(NULL, ";", &saveptr);
