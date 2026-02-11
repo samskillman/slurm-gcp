@@ -351,13 +351,44 @@ static pid_t mount_gcsfuse(const char* bucket, const char* mount_point,
   }
 
   // --- 3. Fork and Mount ---
+  /*
+   * Attempt to regain root privileges to move the child process to the
+   * root cgroup. This prevents the gcsfuse process from blocking the
+   * job step completion.
+   */
+  bool regained_root = false;
+  if (seteuid(0) == 0) {
+    regained_root = true;
+  } else {
+    slurm_error("gcsfuse-mount: Failed to regain root privileges: %m");
+  }
+
   pid_t pid = fork();
 
   if (pid == 0) {
     // >>> CHILD PROCESS START <<<
 
     /*
-     * A. Drop Privileges
+     * A. Move to Root Cgroup (if root)
+     * If we are root, we move ourselves to the root cgroup to avoid hanging
+     * the job step.
+     */
+    if (regained_root) {
+      int cgroup_fd = open("/sys/fs/cgroup/cgroup.procs", O_WRONLY);
+      if (cgroup_fd != -1) {
+        char pid_str[32];
+        snprintf(pid_str, sizeof(pid_str), "%d", getpid());
+        if (write(cgroup_fd, pid_str, strlen(pid_str)) == -1) {
+          slurm_error("gcsfuse-mount: Failed to write to cgroup.procs: %m");
+        }
+        close(cgroup_fd);
+      } else {
+        slurm_error("gcsfuse-mount: Failed to open cgroup.procs: %m");
+      }
+    }
+
+    /*
+     * B. Drop Privileges
      * We drop to the job user's UID/GID before calling gcsfuse. This ensures:
      * 1. gcsfuse runs with the user's permissions.
      * 2. Any user-provided flags (like --key-file) cannot be used to access
@@ -374,7 +405,7 @@ static pid_t mount_gcsfuse(const char* bucket, const char* mount_point,
       }
     }
 
-    // B. Setup Environment
+    // C. Setup Environment
     struct passwd* pw = getpwuid(uid);
     if (pw) setenv("HOME", pw->pw_dir, 1);
 
@@ -508,8 +539,17 @@ static pid_t mount_gcsfuse(const char* bucket, const char* mount_point,
 
     // >>> CHILD PROCESS END <<<
   } else if (pid < 0) {
+    if (regained_root) {
+      seteuid(uid);
+    }
     slurm_error("gcsfuse-mount: fork failed: %m");
     return -1;
+  }
+
+  if (regained_root) {
+    if (seteuid(uid) != 0) {
+      slurm_error("gcsfuse-mount: Failed to drop root privileges in parent: %m");
+    }
   }
 
   // --- 4. Parent Waits for Mount ---
@@ -677,9 +717,12 @@ static int handle_gcsfuse_mount(int val, const char* optarg, int remote) {
   return 0;
 }
 
-int slurm_spank_user_init(spank_t sp, int ac, char** av) {
+int slurm_spank_init_post_opt(spank_t sp, int ac, char** av) {
   (void)ac;
   (void)av;
+
+  if (spank_context() != S_CTX_REMOTE) return 0;
+
   uid_t uid;
   gid_t gid;
   char mount_env_buf[4096];
