@@ -22,12 +22,12 @@ diff --git a/slurm/slurm.h b/slurm/slurm.h
 index 17ff14c6a7..cc3b4d5e3e 100644
 --- a/slurm/slurm.h
 +++ b/slurm/slurm.h
-@@ -1823,6 +1823,7 @@ typedef struct job_descriptor {\t/* For submit, allocate, and update requests */
-	char *x11_magic_cookie;\t/* automatically stolen from submit node */
-	char *x11_target;\t/* target hostname, or unix socket if port == 0 */
+@@ -1823,6 +1823,7 @@ typedef struct job_descriptor {	/* For submit, allocate, and update requests */
+	char *x11_magic_cookie;	/* automatically stolen from submit node */
+	char *x11_target;	/* target hostname, or unix socket if port == 0 */
 	uint16_t x11_target_port; /* target tcp port, 6000 + the display number */
-+	char *tpu_slice;\t/* --tpu-slice option */
-} job_desc_msg_t;
++	char *tpu_slice;	/* --tpu-slice option */
+ } job_desc_msg_t;
  
 typedef struct job_info {
 diff --git a/src/common/slurm_opt.c b/src/common/slurm_opt.c
@@ -81,13 +81,13 @@ index a17deea072..3a3b1b0b1e 100644
  	LONG_OPT_GRES_FLAGS,
  	LONG_OPT_HINT,
 @@ -382,6 +383,7 @@ typedef struct {
- 	char *gpus_per_node;\t\t/* --gpus_per_node\t\t*/
- 	char *gpus_per_socket;\t\t/* --gpus_per_socket\t\t*/
- 	char *gpus_per_task;\t\t/* --gpus_per_task\t\t*/
-+	char *tpu_slice;\t\t/* --tpu-slice\t\t*/
+ 	char *gpus_per_node;		/* --gpus_per_node		*/
+ 	char *gpus_per_socket;		/* --gpus_per_socket		*/
+ 	char *gpus_per_task;		/* --gpus_per_task		*/
++	char *tpu_slice;		/* --tpu-slice		*/
  
- 	int pn_min_cpus;\t\t/* --mincpus\t\t\t*/
- 	uint64_t mem_per_cpu;\t\t/* --mem-per-cpu\t\t*/
+ 	int pn_min_cpus;		/* --mincpus			*/
+ 	uint64_t mem_per_cpu;		/* --mem-per-cpu		*/
 diff --git a/src/common/slurm_protocol_defs.c b/src/common/slurm_protocol_defs.c
 index d640a09365..f3b3a3e3e5 100644
 --- a/src/common/slurm_protocol_defs.c
@@ -449,6 +449,7 @@ pkglib_LTLIBRARIES = job_submit_tpu.la
 +# Job submit tpu plugin.
 +job_submit_tpu_la_SOURCES = job_submit_tpu.c
 +job_submit_tpu_la_LDFLAGS = $(PLUGIN_FLAGS)
++
 diff --git a/src/plugins/job_submit/tpu/job_submit_tpu.c b/src/plugins/job_submit/tpu/job_submit_tpu.c
 new file mode 100644
 index 0000000000..c5a4f100d1
