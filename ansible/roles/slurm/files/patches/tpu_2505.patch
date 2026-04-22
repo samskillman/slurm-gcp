@@ -1,149 +1,113 @@
-diff --git a/configure.ac b/configure.ac
-index 4e70272689..b0d3f3b3e5 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -501,6 +501,7 @@ AC_CONFIG_FILES([Makefile
-		 src/plugins/gres/mps/Makefile
-		 src/plugins/gres/nic/Makefile
-		 src/plugins/gres/shard/Makefile
-+		 src/plugins/gres/tpu/Makefile
-		 src/plugins/hash/Makefile
-		 src/plugins/hash/common_xkcp/Makefile
-		 src/plugins/hash/k12/Makefile
-@@ -519,6 +520,7 @@ AC_CONFIG_FILES([Makefile
-		 src/plugins/job_submit/pbs/Makefile
-		 src/plugins/job_submit/require_timelimit/Makefile
-		 src/plugins/job_submit/throttle/Makefile
-+		 src/plugins/job_submit/tpu/Makefile
-		 src/plugins/jobacct_gather/Makefile
-		 src/plugins/jobacct_gather/cgroup/Makefile
-		 src/plugins/jobacct_gather/common/Makefile
-diff --git a/slurm/slurm.h b/slurm/slurm.h
-index 17ff14c6a7..cc3b4d5e3e 100644
+@@ -365,6 +365,7 @@
+ AC_ARG_WITH(json, AS_HELP_STRING([--with-json], [use json parser]))
+ AC_ARG_WITH(jwt, AS_HELP_STRING([--with-jwt], [use jwt parser]))
+ AC_ARG_WITH(lustre, AS_HELP_STRING([--with-lustre=DIR], [use lustre library]))
++AC_ARG_WITH(gcp, AS_HELP_STRING([--with-gcp], [Enable GCP integration]))
+ AC_ARG_WITH(lz4, AS_HELP_STRING([--with-lz4], [use lz4 library]))
+ AC_ARG_WITH(munge, AS_HELP_STRING([--with-munge=DIR], [use munge library]))
+ AC_ARG_WITH(mysql, AS_HELP_STRING([--with-mysql=DIR], [use mysql library]))
+@@ -2526,6 +2527,11 @@
+ AC_SUBST(SLURM_PLUGIN_LDFLAGS)
+ AC_SUBST(SLURM_PLUGIN_LIBS)
+ 
++if test "x$with_gcp" = "xyes"; then
++   AC_DEFINE(HAVE_GCP, 1, [Enable GCP integration])
++   SLURM_PLUGIN_LIBS="$SLURM_PLUGIN_LIBS -lgoogle-cloud-cpp_common -lgoogle-cloud-cpp_compute_instances"
++fi
++
+ dnl ==========================================================================
+dnl Check for libraries
+dnl ==========================================================================
 --- a/slurm/slurm.h
 +++ b/slurm/slurm.h
-@@ -1823,6 +1823,7 @@ typedef struct job_descriptor {	/* For submit, allocate, and update requests */
-	char *x11_magic_cookie;	/* automatically stolen from submit node */
-	char *x11_target;	/* target hostname, or unix socket if port == 0 */
-	uint16_t x11_target_port; /* target tcp port, 6000 + the display number */
+@@ -1533,6 +1533,7 @@
+ 	char *wckey;		/* Workload Characterization Key */
+ 	uint16_t x11;		/* X11 forwarding requested, 0=no, 1=yes */
+ 	char *x11_nodes;	/* list of nodes with x11 forwarding */
 +	char *tpu_slice;	/* --tpu-slice option */
  } job_desc_msg_t;
  
-typedef struct job_info {
-diff --git a/src/common/slurm_opt.c b/src/common/slurm_opt.c
-index 976fc466af..5f237b8e0d 100644
+ typedef struct job_info {
 --- a/src/common/slurm_opt.c
 +++ b/src/common/slurm_opt.c
-@@ -1677,6 +1677,17 @@ static slurm_cli_opt_t slurm_opt_gpus_per_task = {
- 	.reset_each_pass = true,
- };
- 
-+COMMON_STRING_OPTION(tpu_slice);
-+static slurm_cli_opt_t slurm_opt_tpu_slice = {
-+	.name = "tpu-slice",
-+	.has_arg = required_argument,
-+	.val = LONG_OPT_TPU_SLICE,
-+	.set_func = arg_set_tpu_slice,
-+	.get_func = arg_get_tpu_slice,
-+	.reset_func = arg_reset_tpu_slice,
-+	.reset_each_pass = true,
-+};
-+
- static int arg_set_tree_width(slurm_opt_t *opt, const char *arg)
- {
- 	if (!opt->srun_opt)
-@@ -4298,6 +4309,7 @@ static const slurm_cli_opt_t *common_options[] = {
- 	&slurm_opt_mem_per_cpu,
- 	&slurm_opt_mem_per_gpu,
- 	&slurm_opt_mincpus,
-+	&slurm_opt_tpu_slice,
- 	&slurm_opt_mpi,
- 	&slurm_opt_msg_timeout,
- 	&slurm_opt_multi_prog,
-@@ -5927,6 +5939,7 @@ extern job_desc_msg_t *slurm_opt_create_job_desc(slurm_opt_t *opt_local,
- 		  opt_local->gpus_per_socket);
- 
- 	job_desc->tres_per_task = xstrdup(opt_local->tres_per_task);
-+	job_desc->tpu_slice = xstrdup(opt_local->tpu_slice);
- 	job_desc->user_id = opt_local->uid;
- 
- 	/* wait_all_nodes not filled in here */
-diff --git a/src/common/slurm_opt.h b/src/common/slurm_opt.h
-index a17deea072..3a3b1b0b1e 100644
+@@ -178,6 +178,7 @@
+ 	{ "task-prolog",	required_argument, NULL, LONG_OPT_TASK_PROLOG },
+ 	{ "tasks-per-tres",	required_argument, NULL, LONG_OPT_TASKS_PER_TRES },
+ 	{ "test-only",		no_argument,	   NULL, LONG_OPT_TEST_ONLY },
++	{ "tpu-slice",		required_argument, NULL, LONG_OPT_TPU_SLICE },
+ 	{ "thread-spec",	required_argument, NULL, LONG_OPT_THREAD_SPEC },
+ 	{ "threads-per-core",	required_argument, NULL, LONG_OPT_THREADS_PER_CORE },
+ 	{ "time",		required_argument, NULL, 't' },
+@@ -501,6 +502,14 @@
+   .val = LONG_OPT_GPUS_PER_TASK,
+   .usage = "number of gpus required per task",
+   .reset_each_pass = true, },
++{ .name = "tpu-slice",
++  .arg_type = SLURM_OPT_STRING,
++  .arg_set_func = arg_set_tpu_slice,
++  .val = LONG_OPT_TPU_SLICE,
++  .usage = "Specify the TPU slice configuration",
++  .reset_each_pass = true,
++},
+ { .name = "gres",
+   .arg_type = SLURM_OPT_STRING,
+   .arg_val = &opt_gres,
 --- a/src/common/slurm_opt.h
 +++ b/src/common/slurm_opt.h
-@@ -117,6 +117,7 @@ enum {
- 	LONG_OPT_GPUS_PER_NODE,
- 	LONG_OPT_GPUS_PER_SOCKET,
- 	LONG_OPT_GPUS_PER_TASK,
+@@ -180,6 +180,7 @@
+ 	LONG_OPT_TASKS_PER_TRES,
+ 	LONG_OPT_TEST_ONLY,
+ 	LONG_OPT_THREAD_SPEC,
 +	LONG_OPT_TPU_SLICE,
- 	LONG_OPT_GRES,
- 	LONG_OPT_GRES_FLAGS,
- 	LONG_OPT_HINT,
-@@ -382,6 +383,7 @@ typedef struct {
- 	char *gpus_per_node;		/* --gpus_per_node		*/
- 	char *gpus_per_socket;		/* --gpus_per_socket		*/
- 	char *gpus_per_task;		/* --gpus_per_task		*/
-+	char *tpu_slice;		/* --tpu-slice		*/
- 
- 	int pn_min_cpus;		/* --mincpus			*/
- 	uint64_t mem_per_cpu;		/* --mem-per-cpu		*/
-diff --git a/src/common/slurm_protocol_defs.c b/src/common/slurm_protocol_defs.c
-index d640a09365..f3b3a3e3e5 100644
+ 	LONG_OPT_THREADS_PER_CORE,
+ 	LONG_OPT_TIME,
+ 	LONG_OPT_TIME_MIN,
 --- a/src/common/slurm_protocol_defs.c
 +++ b/src/common/slurm_protocol_defs.c
-@@ -1713,6 +1713,7 @@ extern void slurm_free_job_desc_msg(job_desc_msg_t *msg)
- 		xfree(msg->work_dir);
- 		xfree(msg->x11_magic_cookie);
- 		xfree(msg->x11_target);
+@@ -1403,6 +1403,7 @@
+ 		xfree(msg->wait_all_nodes);
+ 		xfree(msg->wckey);
+ 		xfree(msg->x11_nodes);
 +		xfree(msg->tpu_slice);
  		xfree(msg);
  	}
  }
-diff --git a/src/common/slurm_protocol_pack.c b/src/common/slurm_protocol_pack.c
-index 5911624cad..a5d3f3b3e5 100644
 --- a/src/common/slurm_protocol_pack.c
 +++ b/src/common/slurm_protocol_pack.c
-@@ -6964,6 +6964,7 @@ static void _pack_job_desc_msg(const slurm_msg_t *smsg, buf_t *buffer)
- 		pack32(msg->min_nodes, buffer);
- 		pack32(msg->max_nodes, buffer);
- 		packstr(msg->job_size_str, buffer);
-+		packstr(msg->tpu_slice, buffer);
- 		pack16(msg->boards_per_node, buffer);
- 		pack16(msg->sockets_per_board, buffer);
- 		pack16(msg->sockets_per_node, buffer);
-@@ -7546,6 +7547,7 @@ static int _unpack_job_desc_msg(slurm_msg_t *smsg, buf_t *buffer)
- 		safe_unpack32(&msg->min_nodes, buffer);
- 		safe_unpack32(&msg->max_nodes, buffer);
- 		safe_unpackstr(&msg->job_size_str, buffer);
-+		safe_unpackstr(&msg->tpu_slice, buffer);
- 		safe_unpack16(&msg->boards_per_node, buffer);
- 		safe_unpack16(&msg->sockets_per_board, buffer);
- 		safe_unpack16(&msg->sockets_per_node, buffer);
-diff --git a/src/plugins/gres/Makefile.am b/src/plugins/gres/Makefile.am
-index 9c217c1704..d4d3f3b3e5 100644
+@@ -4233,6 +4233,7 @@
+ 	packstr(job_desc->wait_all_nodes, buffer);
+ 	packstr(job_desc->wckey, buffer);
+ 	pack16(job_desc->x11, buffer);
++	packstr(job_desc->tpu_slice, buffer);
+ 	packstr(job_desc->x11_nodes, buffer);
+ }
+ 
+@@ -4620,6 +4621,7 @@
+ 	safe_unpackstr(&job_desc->wait_all_nodes, buffer);
+ 	safe_unpackstr(&job_desc->wckey, buffer);
+ 	safe_unpack16(&job_desc->x11, buffer);
++	safe_unpackstr(&job_desc->tpu_slice, buffer);
+ 	safe_unpackstr(&job_desc->x11_nodes, buffer);
+ 	return SLURM_SUCCESS;
+ }
 --- a/src/plugins/gres/Makefile.am
 +++ b/src/plugins/gres/Makefile.am
 @@ -1,3 +1,3 @@
  # Makefile for gres plugins
  
--SUBDIRS = common gpu nic mps shard
-+SUBDIRS = common gpu nic mps shard tpu
-diff --git a/src/plugins/gres/tpu/Makefile.am b/src/plugins/gres/tpu/Makefile.am
-new file mode 100644
-index 0000000000..1bcc60d1a6
+--SUBDIRS = common gpu nic mps
++SUBDIRS = common gpu nic mps tpu
 --- /dev/null
 +++ b/src/plugins/gres/tpu/Makefile.am
-@@ -0,0 +1,18 @@
-+# Makefile for gres/tpu plugin
-+
 +AUTOMAKE_OPTIONS = foreign
 +
 +PLUGIN_FLAGS = -module -avoid-version --export-dynamic
 +
 +AM_CPPFLAGS = -DSLURM_PLUGIN_DEBUG -I$(top_srcdir)
 +
-pkglib_LTLIBRARIES = gres_tpu.la
++pkglib_LTLIBRARIES = gres_tpu.la
 +
 +# GRES TPU plugin.
 gres_tpu_la_SOURCES = gres_tpu.c
@@ -153,12 +117,8 @@ gres_tpu_la_LIBADD = ../common/libgres_common.la
 +force:
 +$(gres_tpu_la_LIBADD) : force
 +	@cd `dirname $@` && $(MAKE) `basename $@`
-diff --git a/src/plugins/gres/tpu/gres_tpu.c b/src/plugins/gres/tpu/gres_tpu.c
-new file mode 100644
-index 0000000000..ce579aea96
 --- /dev/null
 +++ b/src/plugins/gres/tpu/gres_tpu.c
-@@ -0,0 +1,260 @@
 +#include <ctype.h>
 +#include <inttypes.h>
 +#include <stdio.h>
@@ -179,7 +139,6 @@ index 0000000000..ce579aea96
 +
 +#include "../common/gres_common.h"
 +
-+/* Required Slurm plugin symbols: */
 +const char plugin_name[] = "Gres TPU plugin";
 +const char plugin_type[] = "gres/tpu";
 +const uint32_t plugin_version = SLURM_VERSION_NUMBER;
@@ -321,7 +280,6 @@ index 0000000000..ce579aea96
 +
 +	list_t *system_tpus = _get_system_tpu_list();
 +	if (system_tpus && list_count(system_tpus) > 0) {
-+		/* Merge any auto-detected devices into the GRES configuration list */
 +		list_transfer(gres_conf_list, system_tpus);
 +	}
 +	FREE_NULL_LIST(system_tpus);
@@ -419,43 +377,29 @@ index 0000000000..ce579aea96
 +{
 +	return;
 +}
-diff --git a/src/plugins/job_submit/Makefile.am b/src/plugins/job_submit/Makefile.am
-index 4b59b733fe..e5d3f3b3e5 100644
 --- a/src/plugins/job_submit/Makefile.am
 +++ b/src/plugins/job_submit/Makefile.am
-@@ -8,4 +8,5 @@ SUBDIRS = \
+@@ -7,4 +7,5 @@
+ 	lua \
  	partition \
  	pbs \
- 	require_timelimit \
--	throttle
-+	throttle \
+-	require_timelimit
++	require_timelimit \
 +	tpu
-diff --git a/src/plugins/job_submit/tpu/Makefile.am b/src/plugins/job_submit/tpu/Makefile.am
-new file mode 100644
-index 0000000000..91f577bfd1
 --- /dev/null
 +++ b/src/plugins/job_submit/tpu/Makefile.am
-@@ -0,0 +1,13 @@
-+# Makefile for job_submit/tpu plugin
-+
 +AUTOMAKE_OPTIONS = foreign
 +
 +PLUGIN_FLAGS = -module -avoid-version --export-dynamic
 +
 +AM_CPPFLAGS = -DSLURM_PLUGIN_DEBUG -I$(top_srcdir)
 +
-pkglib_LTLIBRARIES = job_submit_tpu.la
++pkglib_LTLIBRARIES = job_submit_tpu.la
 +
-+# Job submit tpu plugin.
 +job_submit_tpu_la_SOURCES = job_submit_tpu.c
 +job_submit_tpu_la_LDFLAGS = $(PLUGIN_FLAGS)
-+
-diff --git a/src/plugins/job_submit/tpu/job_submit_tpu.c b/src/plugins/job_submit/tpu/job_submit_tpu.c
-new file mode 100644
-index 0000000000..c5a4f100d1
 --- /dev/null
 +++ b/src/plugins/job_submit/tpu/job_submit_tpu.c
-@@ -0,0 +1,137 @@
 +#include <inttypes.h>
 +#include <stdio.h>
 +#include <string.h>
@@ -470,7 +414,6 @@ index 0000000000..c5a4f100d1
 +#include "src/common/xstring.h"
 +#include "src/slurmctld/slurmctld.h"
 +
-+/* Required Slurm plugin symbols: */
 +const char plugin_name[] = "Job submit tpu plugin";
 +const char plugin_type[] = "job_submit/tpu";
 +const uint32_t plugin_version = SLURM_VERSION_NUMBER;
@@ -480,7 +423,6 @@ index 0000000000..c5a4f100d1
 +	if (!job_desc->tpu_slice)
 +		return SLURM_SUCCESS;
 +
-+	/* Parse job_desc->tpu_slice expected format [TYPE]:[TOPOLOGY] */
 +	char *tpu_str = xstrdup(job_desc->tpu_slice);
 +	char *colon = strchr(tpu_str, ':');
 +
@@ -498,14 +440,12 @@ index 0000000000..c5a4f100d1
 +
 +	info("job_submit/tpu: DEMO LOG: Received slice request %s:%s", tpu_type, tpu_topology);
 +
-+	/* Compute node count and properties depending on TPU generation */
 +	int x = 0, y = 0, z = 0;
 +	uint32_t num_nodes = 0;
 +	uint32_t num_chips = 0;
 +	uint32_t tres_count = 1;
 +
 +	if (xstrcmp(tpu_type, "v6e") == 0) {
-+		/* v6e is 2D (XxY) and has 4 chips per node. Max slice 16x16 (256 chips / 64 nodes) */
 +		if (sscanf(tpu_topology, "%dx%d", &x, &y) == 2 ||
 +		    sscanf(tpu_topology, "%d_%d", &x, &y) == 2) {
 +			num_chips = x * y;
@@ -527,7 +467,6 @@ index 0000000000..c5a4f100d1
 +			return SLURM_ERROR;
 +		}
 +	} else if (xstrcmp(tpu_type, "tpu7x") == 0) {
-+		/* tpu7x is 3D (XxYxZ), 4 chips per node. Max defined super slice starts at 16 nodes (64 chips max bound for OR lists) */
 +		if (sscanf(tpu_topology, "%dx%dx%d", &x, &y, &z) == 3 ||
 +		    sscanf(tpu_topology, "%d_%d_%d", &x, &y, &z) == 3) {
 +			num_chips = x * y * z;
@@ -564,8 +503,6 @@ index 0000000000..c5a4f100d1
 +		return SLURM_ERROR;
 +	}
 +
-+
-+	/* Append to GRES (tres_per_node) */
 +	if (job_desc->tres_per_node) {
 +		char *new_tres = xstrdup_printf("%s,gres/tpu:%s:%u", job_desc->tres_per_node, tpu_type, tres_count);
 +		xfree(job_desc->tres_per_node);
@@ -573,7 +510,6 @@ index 0000000000..c5a4f100d1
 +	} else {
 +		job_desc->tres_per_node = xstrdup_printf("gres/tpu:%s:%u", tpu_type, tres_count);
 +	}
-+
 +
 +	debug("job_submit/tpu: Computed tpu_slice %s -> tres_per_node=%s features=%s min_nodes=%u",
 +	      job_desc->tpu_slice, job_desc->tres_per_node, job_desc->features, job_desc->min_nodes);
@@ -593,22 +529,38 @@ index 0000000000..c5a4f100d1
 +{
 +	return _process_tpu_slice(job_desc, err_msg);
 +}
-diff --git a/src/salloc/opt.c b/src/salloc/opt.c
-index 9659e47103..a5d3f3b3e5 100644
+--- a/src/plugins/select/cons_tres/job_info.c
++++ b/src/plugins/select/cons_tres/job_info.c
+@@ -2582,6 +2582,10 @@
+ 	if (job->details->tres_per_task)
+ 		select_g_tres_sprint(job->details->tres_per_task,
+ 				     buf, sizeof(buf), 0);
++	if (job->details->tpu_slice) {
++		xstrcat(ret_str, " TpuSlice=");
++		xstrcat(ret_str, job->details->tpu_slice);
++	}
+ 
+ 	if (select_g_job_req_tres_display_str(job, &tres_str)) {
+ 		xstrcat(ret_str, " TresPerJob=");
+--- a/src/plugins/select/cray_aries/job_info.c
++++ b/src/plugins/select/cray_aries/job_info.c
+@@ -119,6 +119,11 @@
+ 		xstrcat(ret_str, " MCS_label=");
+ 		xstrcat(ret_str, job->details->mcs_label);
+ 	}
++	if (job->details->tpu_slice) {
++		xstrcat(ret_str, " TpuSlice=");
++		xstrcat(ret_str, job->details->tpu_slice);
++	}
++
+ 	if (job->details->mem_per_tres) {
+ 		xstrcat(ret_str, " MemPerTres=");
+ 		xstrcat(ret_str, job->details->mem_per_tres);
 --- a/src/salloc/opt.c
 +++ b/src/salloc/opt.c
-@@ -799,7 +799,7 @@ static void _usage(void)
- "              [--cpus-per-gpu=n] [--gpus=n] [--gpu-bind=...] [--gpu-freq=...]\n"
- "              [--gpus-per-node=n] [--gpus-per-socket=n] [--gpus-per-task=n]\n"
- "              [--mem-per-gpu=MB] [--tres-bind=...] [--tres-per-task=list]\n"
--"              [--oom-kill-step[=0|1]]\n"
-+"              [--tpu-slice=type:shape] [--oom-kill-step[=0|1]]\n"
- "              [command [args...]]\n");
- }
- 
-@@ -939,6 +939,11 @@ static void _help(void)
+@@ -411,6 +411,11 @@
+ "      --mem-per-gpu=n         real memory required per allocated GPU\n"
  		);
- 	spank_print_options(stdout, 6, 30);
  
 +	printf("\n"
 +"TPU scheduling options:\n"
@@ -616,47 +568,148 @@ index 9659e47103..a5d3f3b3e5 100644
 +		);
 +
  	printf("\n"
- "\n"
  "Help options:\n"
-diff --git a/src/sbatch/opt.c b/src/sbatch/opt.c
-index fdd08e10e7..a5d3f3b3e5 100644
+ "  -h, --help                  show this help message\n"
+@@ -440,7 +445,7 @@
+ "              [--cpus-per-gpu=n] [--gpus=n] [--gpu-bind=...] [--gpu-freq=...]\n"
+ "              [--gpus-per-node=n] [--gpus-per-socket=n] [--gpus-per-task=n]\n"
+ "              [--mem-per-gpu=MB]\n"
+-"              [command [args...]]\n");
++"              [--tpu-slice=type:shape] [command [args...]]\n");
+ }
+ 
+ int main(int argc, char **argv)
 --- a/src/sbatch/opt.c
 +++ b/src/sbatch/opt.c
-@@ -1100,7 +1100,7 @@ static void _usage(void)
+@@ -619,6 +619,11 @@
+ "      --mem-per-gpu=n         real memory required per allocated GPU\n"
+ 		);
+ 
++	printf("\n"
++"TPU scheduling options:\n"
++"      --tpu-slice=...         TPU slice type and shape to allocate\n"
++		);
++
+ 	printf("\n"
+ "Help options:\n"
+ "  -h, --help                  show this help message\n"
+@@ -648,7 +653,7 @@
  "              [--cpus-per-gpu=n] [--gpus=n] [--gpu-bind=...] [--gpu-freq=...]\n"
  "              [--gpus-per-node=n] [--gpus-per-socket=n] [--gpus-per-task=n]\n"
- "              [--mem-per-gpu=MB] [--tres-bind=...] [--tres-per-task=list]\n"
--"              [--oom-kill-step[=0|1]]\n"
-+"              [--tpu-slice=type:shape] [--oom-kill-step[=0|1]]\n"
- "              executable [args...]\n");
+ "              [--mem-per-gpu=MB]\n"
+-"              executable [args...]\n");
++"              [--tpu-slice=type:shape] executable [args...]\n");
  }
  
-@@ -1255,6 +1255,11 @@ static void _help(void)
- "      --mem-per-gpu=n         real memory required per allocated GPU\n"
- 		);
+ /*
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -100,6 +100,10 @@
+ #include "src/common/xstring.h"
+ #include "src/slurmctld/slurmctld.h"
  
-+	printf("\n"
-+"TPU scheduling options:\n"
-+"      --tpu-slice=...         TPU slice type and shape to allocate\n"
-+		);
++#ifdef HAVE_GCP
++#  include "src/common/gcp.h"
++#endif
 +
- 	printf("\n"
- "Help options:\n"
- "  -h, --help                  show this help message\n"
-diff --git a/src/srun/opt.c b/src/srun/opt.c
-index 346d9a1e77..a5d3f3b3e5 100644
+ /*
+  * For each partition, a list of jobs that are to be started in the future.
+  * They are order by start time.
+@@ -604,6 +608,10 @@
+ 	if (new_job_ptr->details->tres_per_task)
+ 		select_g_tres_sprint(new_job_ptr->details->tres_per_task,
+ 				     buf, sizeof(buf), 0);
++	if (new_job_ptr->details->tpu_slice)
++		info("TpuSlice=%s",
++		     new_job_ptr->details->tpu_slice);
++
+ 	if (select_g_job_req_tres_display_str(new_job_ptr, &tres_str)) {
+ 		info("TresPerJob=%s", tres_str);
+ 		xfree(tres_str);
+@@ -7280,6 +7288,12 @@
+ 			job_ptr->end_time, NO_VAL);
+ 	}
+ 
++#ifdef HAVE_GCP
++	if (job_ptr->details->tpu_slice) {
++		gcp_delete_tpu_slice(job_ptr);
++	}
++#endif
++
+ 	/* If we are here this job is being requeued or cancelled so
+ 	 * we should always release the licenses. */
+ 	if (job_ptr->licenses)
+@@ -7310,6 +7324,12 @@
+ 	job_ptr->wait_dep_list = NULL;
+ 	job_ptr->req_dep_list = NULL;
+ 
++#ifdef HAVE_GCP
++	if (job_ptr->details->tpu_slice) {
++		gcp_delete_tpu_slice(job_ptr);
++	}
++#endif
++
+ 	if (job_ptr->job_state == JOB_PENDING) {
+ 		if (job_ptr->details->het_job_id == 0)
+ 			dec_suspended_job_cnt(job_ptr->part_ptr,
+@@ -7400,6 +7420,12 @@
+ 	job_ptr->wait_dep_list = NULL;
+ 	job_ptr->req_dep_list = NULL;
+ 
++#ifdef HAVE_GCP
++	if (job_ptr->details->tpu_slice) {
++		gcp_delete_tpu_slice(job_ptr);
++	}
++#endif
++
+ 	if (job_ptr->job_state == JOB_PENDING) {
+ 		if (job_ptr->details->het_job_id == 0)
+ 			dec_suspended_job_cnt(job_ptr->part_ptr,
+@@ -10081,6 +10107,12 @@
+ 	job_desc_msg->priority      = job_ptr->priority;
+ 	job_desc_msg->req_switch    = job_ptr->req_switch;
+ 
++#ifdef HAVE_GCP
++	if (job_ptr->details->tpu_slice) {
++		gcp_create_tpu_slice(job_ptr);
++	}
++#endif
++
+ 	if (job_ptr->details) {
+ 		job_desc_msg->contiguous    = job_ptr->details->contiguous;
+ 		job_desc_msg->cpu_bind      = job_ptr->details->cpu_bind;
+--- a/src/slurmctld/slurmctld.h
++++ b/src/slurmctld/slurmctld.h
+@@ -101,6 +101,7 @@
+ 	char *resp_host;
+ 	char *select_jobinfo;
+ 	char *shared;
++	char *tpu_slice;
+ 	char *tres_bind;
+ 	char *tres_freq;
+ 	char *tres_per_job;
 --- a/src/srun/opt.c
 +++ b/src/srun/opt.c
-@@ -1514,7 +1514,7 @@ static void _usage(void)
- "            [--cpus-per-gpu=n] [--gpus=n] [--gpu-bind=...] [--gpu-freq=...]\n"
- "            [--gpus-per-node=n] [--gpus-per-socket=n] [--gpus-per-task=n]\n"
- "            [--mem-per-gpu=MB] [--tres-bind=...] [--tres-per-task=list]\n"
--"            [--oom-kill-step[=0|1]]\n"
-+"            [--tpu-slice=type:shape] [--oom-kill-step[=0|1]]\n"
- "            executable [args...]\n");
+@@ -118,6 +118,7 @@
+ char *opt_tres_per_task = NULL;
+ char *opt_tres_bind = NULL;
+ char *opt_tres_freq = NULL;
++char *opt_tpu_slice = NULL;
  
- }
-@@ -1705,6 +1705,11 @@ static void _help(void)
+ /*
+  * NOTE: The order of these options is important. They are ordered to permit
+@@ -290,6 +291,10 @@
+ 	job_desc.tres_per_task = opt_tres_per_task;
+ 	job_desc.tres_bind = opt_tres_bind;
+ 	job_desc.tres_freq = opt_tres_freq;
++	if (opt_tpu_slice) {
++		job_desc.tpu_slice = opt_tpu_slice;
++	}
++
+ 	if (job_desc.user_id == 0)
+ 		job_desc.user_id = uid;
+ 
+@@ -803,6 +808,11 @@
  "      --mem-per-gpu=n         real memory required per allocated GPU\n"
  		);
  
@@ -668,3 +721,22 @@ index 346d9a1e77..a5d3f3b3e5 100644
  	printf("\n"
  "Help options:\n"
  "  -h, --help                  show this help message\n"
+@@ -832,7 +842,7 @@
+ "            [--cpus-per-gpu=n] [--gpus=n] [--gpu-bind=...] [--gpu-freq=...]\n"
+ "            [--gpus-per-node=n] [--gpus-per-socket=n] [--gpus-per-task=n]\n"
+ "            [--mem-per-gpu=MB]\n"
+-"            executable [args...]\n");
++"            [--tpu-slice=type:shape] executable [args...]\n");
+ 
+ }
+ 
+--- a/src/srun/srun.h
++++ b/src/srun/srun.h
+@@ -100,6 +100,7 @@
+ 	char *resp_host;
+ 	char *select_jobinfo;
+ 	char *shared;
++	char *tpu_slice;
+ 	char *tres_bind;
+ 	char *tres_freq;
+ 	char *tres_per_job;
