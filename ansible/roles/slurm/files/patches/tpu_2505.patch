@@ -1,25 +1,21 @@
 --- a/configure.ac
 +++ b/configure.ac
-@@ -365,6 +365,7 @@
- AC_ARG_WITH(json, AS_HELP_STRING([--with-json], [use json parser]))
- AC_ARG_WITH(jwt, AS_HELP_STRING([--with-jwt], [use jwt parser]))
- AC_ARG_WITH(lustre, AS_HELP_STRING([--with-lustre=DIR], [use lustre library]))
-+AC_ARG_WITH(gcp, AS_HELP_STRING([--with-gcp], [Enable GCP integration]))
- AC_ARG_WITH(lz4, AS_HELP_STRING([--with-lz4], [use lz4 library]))
- AC_ARG_WITH(munge, AS_HELP_STRING([--with-munge=DIR], [use munge library]))
- AC_ARG_WITH(mysql, AS_HELP_STRING([--with-mysql=DIR], [use mysql library]))
-@@ -2526,6 +2527,11 @@
- AC_SUBST(SLURM_PLUGIN_LDFLAGS)
- AC_SUBST(SLURM_PLUGIN_LIBS)
- 
-+if test "x$with_gcp" = "xyes"; then
-+   AC_DEFINE(HAVE_GCP, 1, [Enable GCP integration])
-+   SLURM_PLUGIN_LIBS="$SLURM_PLUGIN_LIBS -lgoogle-cloud-cpp_common -lgoogle-cloud-cpp_compute_instances"
-+fi
-+
- dnl ==========================================================================
-dnl Check for libraries
-dnl ==========================================================================
+@@ -489,6 +489,7 @@
+ 		 src/plugins/gres/gpu/Makefile
+ 		 src/plugins/gres/mps/Makefile
+ 		 src/plugins/gres/nic/Makefile
++ 		 src/plugins/gres/tpu/Makefile
+ 		 src/plugins/hash/Makefile
+ 		 src/plugins/hash/common_xkcp/Makefile
+ 		 src/plugins/hash/k12/Makefile
+@@ -506,6 +507,7 @@
+ 		 src/plugins/job_submit/partition/Makefile
+ 		 src/plugins/job_submit/pbs/Makefile
+ 		 src/plugins/job_submit/require_timelimit/Makefile
++		 src/plugins/job_submit/tpu/Makefile
+ 		 src/plugins/jobacct_gather/Makefile
+ 		 src/plugins/jobacct_gather/cgroup/Makefile
+ 		 src/plugins/jobacct_gather/common/Makefile
 --- a/slurm/slurm.h
 +++ b/slurm/slurm.h
 @@ -1533,6 +1533,7 @@
@@ -593,7 +589,7 @@ gres_tpu_la_LIBADD = ../common/libgres_common.la
  	printf("\n"
  "Help options:\n"
  "  -h, --help                  show this help message\n"
-@@ -648,7 +653,7 @@
+@@ -648,7 +648,7 @@
  "              [--cpus-per-gpu=n] [--gpus=n] [--gpu-bind=...] [--gpu-freq=...]\n"
  "              [--gpus-per-node=n] [--gpus-per-socket=n] [--gpus-per-task=n]\n"
  "              [--mem-per-gpu=MB]\n"
@@ -602,92 +598,6 @@ gres_tpu_la_LIBADD = ../common/libgres_common.la
  }
  
  /*
---- a/src/slurmctld/job_mgr.c
-+++ b/src/slurmctld/job_mgr.c
-@@ -100,6 +100,10 @@
- #include "src/common/xstring.h"
- #include "src/slurmctld/slurmctld.h"
- 
-+#ifdef HAVE_GCP
-+#  include "src/common/gcp.h"
-+#endif
-+
- /*
-  * For each partition, a list of jobs that are to be started in the future.
-  * They are order by start time.
-@@ -604,6 +608,10 @@
- 	if (new_job_ptr->details->tres_per_task)
- 		select_g_tres_sprint(new_job_ptr->details->tres_per_task,
- 				     buf, sizeof(buf), 0);
-+	if (new_job_ptr->details->tpu_slice)
-+		info("TpuSlice=%s",
-+		     new_job_ptr->details->tpu_slice);
-+
- 	if (select_g_job_req_tres_display_str(new_job_ptr, &tres_str)) {
- 		info("TresPerJob=%s", tres_str);
- 		xfree(tres_str);
-@@ -7280,6 +7288,12 @@
- 			job_ptr->end_time, NO_VAL);
- 	}
- 
-+#ifdef HAVE_GCP
-+	if (job_ptr->details->tpu_slice) {
-+		gcp_delete_tpu_slice(job_ptr);
-+	}
-+#endif
-+
- 	/* If we are here this job is being requeued or cancelled so
- 	 * we should always release the licenses. */
- 	if (job_ptr->licenses)
-@@ -7310,6 +7324,12 @@
- 	job_ptr->wait_dep_list = NULL;
- 	job_ptr->req_dep_list = NULL;
- 
-+#ifdef HAVE_GCP
-+	if (job_ptr->details->tpu_slice) {
-+		gcp_delete_tpu_slice(job_ptr);
-+	}
-+#endif
-+
- 	if (job_ptr->job_state == JOB_PENDING) {
- 		if (job_ptr->details->het_job_id == 0)
- 			dec_suspended_job_cnt(job_ptr->part_ptr,
-@@ -7400,6 +7420,12 @@
- 	job_ptr->wait_dep_list = NULL;
- 	job_ptr->req_dep_list = NULL;
- 
-+#ifdef HAVE_GCP
-+	if (job_ptr->details->tpu_slice) {
-+		gcp_delete_tpu_slice(job_ptr);
-+	}
-+#endif
-+
- 	if (job_ptr->job_state == JOB_PENDING) {
- 		if (job_ptr->details->het_job_id == 0)
- 			dec_suspended_job_cnt(job_ptr->part_ptr,
-@@ -10081,6 +10107,12 @@
- 	job_desc_msg->priority      = job_ptr->priority;
- 	job_desc_msg->req_switch    = job_ptr->req_switch;
- 
-+#ifdef HAVE_GCP
-+	if (job_ptr->details->tpu_slice) {
-+		gcp_create_tpu_slice(job_ptr);
-+	}
-+#endif
-+
- 	if (job_ptr->details) {
- 		job_desc_msg->contiguous    = job_ptr->details->contiguous;
- 		job_desc_msg->cpu_bind      = job_ptr->details->cpu_bind;
---- a/src/slurmctld/slurmctld.h
-+++ b/src/slurmctld/slurmctld.h
-@@ -101,6 +101,7 @@
- 	char *resp_host;
- 	char *select_jobinfo;
- 	char *shared;
-+	char *tpu_slice;
- 	char *tres_bind;
- 	char *tres_freq;
- 	char *tres_per_job;
 --- a/src/srun/opt.c
 +++ b/src/srun/opt.c
 @@ -118,6 +118,7 @@
