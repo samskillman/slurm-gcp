@@ -321,10 +321,10 @@ index 0000000000..2d98963b92
 +cli_filter_tpu_la_LIBADD = ../common/libcli_filter_common.la
 diff --git a/src/plugins/cli_filter/tpu/cli_filter_tpu.c b/src/plugins/cli_filter/tpu/cli_filter_tpu.c
 new file mode 100644
-index 0000000000..41055cee9f
+index 0000000000..67eb1e5b2d
 --- /dev/null
 +++ b/src/plugins/cli_filter/tpu/cli_filter_tpu.c
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,217 @@
 +#include <inttypes.h>
 +#include <stdio.h>
 +#include <string.h>
@@ -417,8 +417,13 @@ index 0000000000..41055cee9f
 +
 +static int _process_accelerator_topology(slurm_opt_t *opt)
 +{
-+	if (!opt->accelerator_topology)
++	if (!opt->accelerator_topology) {
++		if (opt->gres && strstr(opt->gres, "tpu")) {
++			info("Warning: TPU GRES detected but --accelerator-topology unspecified.");
++			info("Implications: NodesPerBlock limit will not be enforced, and hardware topology may not be optimized.");
++		}
 +		return SLURM_SUCCESS;
++	}
 +
 +	if (!tpu_config_list) {
 +		if (_load_tpu_conf() != SLURM_SUCCESS) {
@@ -465,11 +470,7 @@ index 0000000000..41055cee9f
 +		    sscanf(tpu_topology, "%d_%d", &x, &y) == 2) {
 +			num_chips = x * y;
 +			num_nodes = num_chips / conf->chips_per_node;
-+			if (num_nodes > 0) {
-+				opt->min_nodes = num_nodes;
-+				opt->max_nodes = num_nodes;
-+				debug("cli_filter/tpu: Set nodes to %u", num_nodes);
-+			}
++
 +		} else {
 +			error("cli_filter/tpu: Invalid topology format %s for 2D TPU", tpu_topology);
 +			xfree(tpu_str);
@@ -480,11 +481,7 @@ index 0000000000..41055cee9f
 +		    sscanf(tpu_topology, "%d_%d_%d", &x, &y, &z) == 3) {
 +			num_chips = x * y * z;
 +			num_nodes = num_chips / conf->chips_per_node;
-+			if (num_nodes > 0) {
-+				opt->min_nodes = num_nodes;
-+				opt->max_nodes = num_nodes;
-+				debug("cli_filter/tpu: Set nodes to %u", num_nodes);
-+			}
++
 +		} else {
 +			error("cli_filter/tpu: Invalid topology format %s for 3D TPU", tpu_topology);
 +			xfree(tpu_str);
@@ -492,6 +489,25 @@ index 0000000000..41055cee9f
 +		}
 +	} else {
 +		error("cli_filter/tpu: Unsupported dimensions %u for %s", conf->dimensions, tpu_type);
++		xfree(tpu_str);
++		return SLURM_ERROR;
++	}
++
++	if (num_nodes > 0) {
++		if (opt->min_nodes == 0 || opt->min_nodes == NO_VAL) {
++			opt->min_nodes = num_nodes;
++			opt->max_nodes = num_nodes;
++		} else if (opt->min_nodes != num_nodes) {
++			error("cli_filter/tpu: Requested node count (%d) does not match topology shape %s (requires %u nodes)",
++			      opt->min_nodes, tpu_topology, num_nodes);
++			xfree(tpu_str);
++			return SLURM_ERROR;
++		}
++	}
++
++	if (num_nodes > conf->nodes_per_block) {
++		error("cli_filter/tpu: Requested nodes %u exceeds NodesPerBlock limit %u for %s",
++		      num_nodes, conf->nodes_per_block, tpu_type);
 +		xfree(tpu_str);
 +		return SLURM_ERROR;
 +	}
@@ -948,10 +964,10 @@ index 0000000000..91f577bfd1
 +job_submit_tpu_la_LDFLAGS = $(PLUGIN_FLAGS)
 diff --git a/src/plugins/job_submit/tpu/job_submit_tpu.c b/src/plugins/job_submit/tpu/job_submit_tpu.c
 new file mode 100644
-index 0000000000..9ffef5eac4
+index 0000000000..23043a2f8c
 --- /dev/null
 +++ b/src/plugins/job_submit/tpu/job_submit_tpu.c
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,228 @@
 +#include <inttypes.h>
 +#include <stdio.h>
 +#include <string.h>
@@ -1099,13 +1115,7 @@ index 0000000000..9ffef5eac4
 +			num_nodes = num_chips / conf->chips_per_node;
 +			tres_count = (num_chips < conf->chips_per_node) ? (num_chips == 0 ? 1 : num_chips) : conf->chips_per_node;
 +
-+			if (num_nodes > 0) {
-+				if (job_desc->min_nodes != num_nodes) {
-+					info("job_submit/tpu: Overriding node count to %u based on slice shape", num_nodes);
-+					job_desc->min_nodes = num_nodes;
-+					job_desc->max_nodes = num_nodes;
-+				}
-+			}
++
 +		} else {
 +			if (err_msg) *err_msg = xstrdup_printf("Invalid topology format %s for 2D TPU", tpu_topology);
 +			xfree(tpu_str);
@@ -1118,18 +1128,33 @@ index 0000000000..9ffef5eac4
 +			num_nodes = num_chips / conf->chips_per_node;
 +			tres_count = (num_chips < conf->chips_per_node) ? (num_chips == 0 ? 1 : num_chips) : conf->chips_per_node;
 +
-+			if (num_nodes > 0) {
-+				if (job_desc->min_nodes != num_nodes) {
-+					info("job_submit/tpu: Overriding node count to %u based on slice shape", num_nodes);
-+					job_desc->min_nodes = num_nodes;
-+					job_desc->max_nodes = num_nodes;
-+				}
-+			}
++
 +		} else {
 +			if (err_msg) *err_msg = xstrdup_printf("Invalid topology format %s for 3D TPU", tpu_topology);
 +			xfree(tpu_str);
 +			return SLURM_ERROR;
 +		}
++	}
++
++	if (num_nodes > 0) {
++		if (job_desc->min_nodes == 0 || job_desc->min_nodes == NO_VAL) {
++			job_desc->min_nodes = num_nodes;
++			job_desc->max_nodes = num_nodes;
++		} else if (job_desc->min_nodes != num_nodes) {
++			error("job_submit/tpu: Requested node count (%u) does not match topology shape %s (requires %u nodes)",
++			      job_desc->min_nodes, tpu_topology, num_nodes);
++			if (err_msg) *err_msg = xstrdup("Node count does not match topology shape");
++			xfree(tpu_str);
++			return SLURM_ERROR;
++		}
++	}
++
++	if (num_nodes > conf->nodes_per_block) {
++		error("job_submit/tpu: Requested nodes %u exceeds NodesPerBlock limit %u for %s",
++		      num_nodes, conf->nodes_per_block, tpu_type);
++		if (err_msg) *err_msg = xstrdup_printf("Requested nodes exceeds limit for %s", tpu_type);
++		xfree(tpu_str);
++		return SLURM_ERROR;
 +	}
 +
 +	/* Append to GRES (tres_per_node) */
