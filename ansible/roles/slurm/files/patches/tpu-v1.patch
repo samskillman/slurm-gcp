@@ -59,7 +59,7 @@ index 0000000000..5d6a1384a6
 +TPUType=v6e ChipsPerNode=4 Dimensions=2 NodesPerSubBlock=64 NodesPerBlock=64 PciDeviceId=0x006f
 +TPUType=7x ChipsPerNode=4 Dimensions=3 NodesPerSubBlock=16 NodesPerBlock=2304 PciDeviceId=0x0076
 diff --git a/slurm/slurm.h b/slurm/slurm.h
-index 4d961c0d0a..bc358e5a9f 100644
+index 4d961c0d0a..819efd6bda 100644
 --- a/slurm/slurm.h
 +++ b/slurm/slurm.h
 @@ -1823,6 +1823,7 @@ typedef struct job_descriptor {	/* For submit, allocate, and update requests */
@@ -70,6 +70,14 @@ index 4d961c0d0a..bc358e5a9f 100644
  } job_desc_msg_t;
 
  typedef struct job_info {
+@@ -1876,6 +1877,7 @@ typedef struct job_info {
+ 				 * start_range_2, .., -1  */
+ 	uint32_t exit_code;	/* exit code for job (status from wait call) */
+ 	char *extra;		/* Arbitrary string */
++	char *accelerator_topology; /* --accelerator-topology option */
+ 	char *failed_node;	/* if set, node that caused job to fail */
+ 	char *features;		/* comma separated list of required features */
+ 	char *fed_origin_str;	/* Origin cluster's name */
 diff --git a/src/api/Makefile.am b/src/api/Makefile.am
 index b153a19bdd..6bef8c2c86 100644
 --- a/src/api/Makefile.am
@@ -153,6 +161,46 @@ index c90eea1ffa..d3e5597a32 100644
  	NULL,
  };
 
+diff --git a/src/common/job_record.c b/src/common/job_record.c
+index 1a998377c7..c1e66505d7 100644
+--- a/src/common/job_record.c
++++ b/src/common/job_record.c
+@@ -249,6 +249,7 @@ extern void job_record_delete(void *job_entry)
+ 	xfree(job_ptr->clusters);
+ 	xfree(job_ptr->cpus_per_tres);
+ 	xfree(job_ptr->extra);
++	xfree(job_ptr->accelerator_topology);
+ 	FREE_NULL_EXTRA_CONSTRAINTS(job_ptr->extra_constraints);
+ 	xfree(job_ptr->failed_node);
+ 	job_record_free_fed_details(&job_ptr->fed_details);
+@@ -2317,6 +2318,7 @@ extern void job_record_pack_common(job_record_t *dump_job_ptr,
+
+ 		pack32(dump_job_ptr->exit_code, buffer);
+ 		packstr(dump_job_ptr->extra, buffer);
++		packstr(dump_job_ptr->accelerator_topology, buffer);
+
+ 		packstr(dump_job_ptr->failed_node, buffer);
+ 		_dump_job_fed_details(dump_job_ptr->fed_details, for_state,
+@@ -2692,6 +2694,7 @@ extern int job_record_unpack_common(job_record_t *job_ptr,
+
+ 		safe_unpack32(&job_ptr->exit_code, buffer);
+ 		safe_unpackstr(&job_ptr->extra, buffer);
++		safe_unpackstr(&job_ptr->accelerator_topology, buffer);
+
+ 		safe_unpackstr(&job_ptr->failed_node, buffer);
+ 		if (_load_job_fed_details(&job_ptr->fed_details, buffer,
+diff --git a/src/common/job_record.h b/src/common/job_record.h
+index b4d4d41229..c07abb1fa0 100644
+--- a/src/common/job_record.h
++++ b/src/common/job_record.h
+@@ -323,6 +323,7 @@ struct job_record {
+ 	uint32_t exit_code;		/* exit code for job (status from
+ 					 * wait call) */
+ 	char *extra;			/* Arbitrary string */
++	char *accelerator_topology;	/* Requested accelerator topology */
+ 	elem_t *extra_constraints;	/* Head of tree built from constraints
+ 					 * defined in "extra". Not state saved.
+ 					 */
 diff --git a/src/common/slurm_opt.c b/src/common/slurm_opt.c
 index 4b4630bea9..69d265bb16 100644
 --- a/src/common/slurm_opt.c
@@ -224,10 +272,18 @@ index 0a46e4489b..e9b871e76d 100644
  	}
  }
 diff --git a/src/common/slurm_protocol_pack.c b/src/common/slurm_protocol_pack.c
-index 9e3f370e86..10fe34386b 100644
+index 9e3f370e86..fc7446b768 100644
 --- a/src/common/slurm_protocol_pack.c
 +++ b/src/common/slurm_protocol_pack.c
-@@ -6964,6 +6964,7 @@ static void _pack_job_desc_msg(const slurm_msg_t *smsg, buf_t *buffer)
+@@ -3470,6 +3470,7 @@ _unpack_job_info_members(job_info_t * job, buf_t *buffer,
+
+ 		safe_unpack32(&job->exit_code, buffer);
+ 		safe_unpackstr(&job->extra, buffer);
++		safe_unpackstr(&job->accelerator_topology, buffer);
+
+ 		safe_unpackstr(&job->failed_node, buffer);
+ 		/* job_record_pack_fed_details */
+@@ -6964,6 +6965,7 @@ static void _pack_job_desc_msg(const slurm_msg_t *smsg, buf_t *buffer)
  		pack32(msg->min_nodes, buffer);
  		pack32(msg->max_nodes, buffer);
  		packstr(msg->job_size_str, buffer);
@@ -235,7 +291,7 @@ index 9e3f370e86..10fe34386b 100644
  		pack16(msg->boards_per_node, buffer);
  		pack16(msg->sockets_per_board, buffer);
  		pack16(msg->sockets_per_node, buffer);
-@@ -7546,6 +7547,7 @@ static int _unpack_job_desc_msg(slurm_msg_t *smsg, buf_t *buffer)
+@@ -7546,6 +7548,7 @@ static int _unpack_job_desc_msg(slurm_msg_t *smsg, buf_t *buffer)
  		safe_unpack32(&msg->min_nodes, buffer);
  		safe_unpack32(&msg->max_nodes, buffer);
  		safe_unpackstr(&msg->job_size_str, buffer);
@@ -321,10 +377,10 @@ index 0000000000..2d98963b92
 +cli_filter_tpu_la_LIBADD = ../common/libcli_filter_common.la
 diff --git a/src/plugins/cli_filter/tpu/cli_filter_tpu.c b/src/plugins/cli_filter/tpu/cli_filter_tpu.c
 new file mode 100644
-index 0000000000..67eb1e5b2d
+index 0000000000..e4419f70dd
 --- /dev/null
 +++ b/src/plugins/cli_filter/tpu/cli_filter_tpu.c
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,219 @@
 +#include <inttypes.h>
 +#include <stdio.h>
 +#include <string.h>
@@ -494,9 +550,11 @@ index 0000000000..67eb1e5b2d
 +	}
 +
 +	if (num_nodes > 0) {
-+		if (opt->min_nodes == 0 || opt->min_nodes == NO_VAL) {
++		bool nodes_set = slurm_option_set_by_cli(opt, 'N') || slurm_option_set_by_env(opt, 'N');
++		if (!nodes_set) {
 +			opt->min_nodes = num_nodes;
 +			opt->max_nodes = num_nodes;
++			debug("cli_filter/tpu: Set nodes to %u based on topology", num_nodes);
 +		} else if (opt->min_nodes != num_nodes) {
 +			error("cli_filter/tpu: Requested node count (%d) does not match topology shape %s (requires %u nodes)",
 +			      opt->min_nodes, tpu_topology, num_nodes);
@@ -964,10 +1022,10 @@ index 0000000000..91f577bfd1
 +job_submit_tpu_la_LDFLAGS = $(PLUGIN_FLAGS)
 diff --git a/src/plugins/job_submit/tpu/job_submit_tpu.c b/src/plugins/job_submit/tpu/job_submit_tpu.c
 new file mode 100644
-index 0000000000..23043a2f8c
+index 0000000000..0a59382a6d
 --- /dev/null
 +++ b/src/plugins/job_submit/tpu/job_submit_tpu.c
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,229 @@
 +#include <inttypes.h>
 +#include <stdio.h>
 +#include <string.h>
@@ -1137,7 +1195,8 @@ index 0000000000..23043a2f8c
 +	}
 +
 +	if (num_nodes > 0) {
-+		if (job_desc->min_nodes == 0 || job_desc->min_nodes == NO_VAL) {
++		if (job_desc->min_nodes == 0 || job_desc->min_nodes == NO_VAL ||
++		    (job_desc->min_nodes == 1 && num_nodes > 1)) {
 +			job_desc->min_nodes = num_nodes;
 +			job_desc->max_nodes = num_nodes;
 +		} else if (job_desc->min_nodes != num_nodes) {
@@ -1252,6 +1311,49 @@ index d384b488bc..1ab11ca5a9 100644
  	printf("\n"
  "Help options:\n"
  "  -h, --help                  show this help message\n"
+diff --git a/src/scontrol/info_job.c b/src/scontrol/info_job.c
+index bbb47e14fe..5edbde1a17 100644
+--- a/src/scontrol/info_job.c
++++ b/src/scontrol/info_job.c
+@@ -902,6 +902,11 @@ static char *_sprint_job_info(job_info_t *job_ptr)
+ 		xstrcat(out, line_end);
+ 	}
+
++	if (job_ptr->accelerator_topology) {
++		xstrfmtcat(out, "AcceleratorTopology=%s", job_ptr->accelerator_topology);
++		xstrcat(out, line_end);
++	}
++
+ 	/****** Line (optional) ******/
+ 	if (job_ptr->tres_per_socket) {
+ 		xstrfmtcat(out, "TresPerSocket=%s", job_ptr->tres_per_socket);
+diff --git a/src/slurmctld/job_mgr.c b/src/slurmctld/job_mgr.c
+index 85b29849e1..dc92db58b7 100644
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -8686,6 +8686,7 @@ static int _copy_job_desc_to_job_record(job_desc_msg_t *job_desc,
+ 	job_ptr->restart_cnt = job_desc->restart_cnt;
+ 	job_ptr->comment    = xstrdup(job_desc->comment);
+ 	job_ptr->extra = xstrdup(job_desc->extra);
++	job_ptr->accelerator_topology = xstrdup(job_desc->accelerator_topology);
+ 	job_ptr->container = xstrdup(job_desc->container);
+ 	job_ptr->container_id = xstrdup(job_desc->container_id);
+ 	job_ptr->container_type = xstrdup(job_desc->container_type);
+diff --git a/src/slurmctld/power_save.c b/src/slurmctld/power_save.c
+index 0fd7b2d56f..33787a6a3c 100644
+--- a/src/slurmctld/power_save.c
++++ b/src/slurmctld/power_save.c
+@@ -509,6 +509,10 @@ static void _do_power_work(time_t now)
+ 		job_node_data = data_set_dict(data_list_append(jobs_data));
+ 		data_set_string(data_key_set(job_node_data, "extra"),
+ 				job_ptr->extra);
++		if (job_ptr->accelerator_topology) {
++			data_set_string(data_key_set(job_node_data, "accelerator_topology"),
++					job_ptr->accelerator_topology);
++		}
+ 		data_set_int(data_key_set(job_node_data, "job_id"),
+ 			     job_ptr->job_id);
+ 		data_set_string(data_key_set(job_node_data, "features"),
 diff --git a/src/srun/opt.c b/src/srun/opt.c
 index a6db13da57..f9f0e4f897 100644
 --- a/src/srun/opt.c
